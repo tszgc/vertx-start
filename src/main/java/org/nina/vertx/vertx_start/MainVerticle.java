@@ -6,10 +6,10 @@ import io.vertx.config.ConfigStoreOptions;
 import io.vertx.core.*;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
-import io.vertx.ext.web.RoutingContext;
-import io.vertx.ext.web.handler.StaticHandler;
 
 public class MainVerticle extends AbstractVerticle {
+
+    final JsonObject loadedConfig = new JsonObject();
 
     @Override
     public void start(Promise<Void> start) throws Exception {
@@ -19,33 +19,48 @@ public class MainVerticle extends AbstractVerticle {
 //        vertx.deployVerticle("org.nina.vertx.vertx_start.HelloVerticle", opts);
         //vertx.deployVerticle(new HelloVerticle());
 
+        // Sequential Composition - Do A, Then B, Then C ... Handle errors
+        // Concurrent Composition - Do A, B, C and D and once all/any complete -Do something else ....
+        doConfig()
+            .compose(this::storeConfig)
+            .compose(this::deployOtherVerticles)
+            .onComplete(start::handle);
+
         vertx.deployVerticle("Hello.groovy");
         vertx.deployVerticle("Hello.js");
+        /**
+        Handler<AsyncResult<Void>> dbMigrationResultHandler = result -> this.handleMigrationResult(start, result);
+        vertx.executeBlocking(this::doDataBaseMigrations, dbMigrationResultHandler);
+        */
 
-        Router router = Router.router(vertx);
-
-//        router.route().handler(ctx -> {
-//            String authToken = ctx.request().getHeader("AUTH_TOKEN");
-//            if (authToken != null && "abc".contentEquals(authToken)) {
-//                ctx.next();
-//            } else {
-//                ctx.response().setStatusCode(401).setStatusMessage("UNAUTHORIZED").end();
-//            }
-//        });
-
-        router.get("/api/v1/hello").handler(this::helloVertx);
-        router.get("/api/v1/hello/:name").handler(this::helloName);
-        router.route().handler(StaticHandler.create("web"));
-//        int httpPort;
-//        try {
-//            httpPort = Integer.parseInt(System.getProperty("http.port", "8080"));
-//        } catch (NumberFormatException nfe) {
-//            httpPort = 8080;
-//        }
-        doConfig(start, router);
+        //doConfig(start, router);
     }
 
-    private void doConfig(Promise<Void> start, Router router) {
+    Future<Void> deployOtherVerticles(Void unused) {
+        DeploymentOptions opts = new DeploymentOptions().setConfig(loadedConfig);
+
+        //Future<String> dbVerticle = Future.future(promise -> vertx.deployVerticle(new DataBaseVerticle(), opts, promise));
+        Future<String> webVerticle = Future.future(promise -> vertx.deployVerticle(new WebVerticle(), opts, promise));
+        Future<String> helloGroovy = Future.future(promise -> vertx.deployVerticle("Hello.groovy", opts, promise));
+        Future<String> helloJs = Future.future(promise -> vertx.deployVerticle("Hello.js", opts, promise));
+
+        //return CompositeFuture.all(helloGroovy, helloJs, dbVerticle, webVerticle).mapEmpty();
+        return CompositeFuture.all(helloGroovy, helloJs, webVerticle).mapEmpty();
+    }
+
+    Future<Void> storeConfig(JsonObject config) {
+        loadedConfig.mergeIn(config);
+        return Promise.<Void>promise().future();
+    }
+
+    void handleMigrationResult(Promise<Void> start, AsyncResult<Void> result) {
+        if (result.failed()) {
+            start.fail(result.cause());
+        }
+    }
+
+
+    Future<JsonObject> doConfig() {
         ConfigStoreOptions defaultConfig = new ConfigStoreOptions()
             .setType("file")
             .setFormat("yaml")
@@ -60,9 +75,7 @@ public class MainVerticle extends AbstractVerticle {
             .addStore(cliConfig);
 
         ConfigRetriever cfgRetriever = ConfigRetriever.create(vertx, opts);
-
-        Handler<AsyncResult<JsonObject>> handler = asyncResult -> this.handleConfigResults(start, router, asyncResult);
-        cfgRetriever.getConfig(handler);
+        return Future.future(promise -> cfgRetriever.getConfig(promise));
     }
 
     void handleConfigResults(Promise<Void> start, Router router, AsyncResult<JsonObject> asyncResult) {
@@ -76,20 +89,5 @@ public class MainVerticle extends AbstractVerticle {
             //
             start.fail("Unable to load configuration");
         }
-    }
-
-    void helloVertx(RoutingContext ctx) {
-        //ctx.request().response().end("Hello Vert.x World!");
-        vertx.eventBus().request("hello.vertx.addr", "", reply -> {
-            ctx.request().response().end((String)reply.result().body());
-        });
-    }
-
-    void helloName(RoutingContext ctx) {
-        String name = ctx.pathParam("name");
-        //ctx.request().response().end(String.format("Hello %s!", name));
-        vertx.eventBus().request("hello.named.addr", name, reply -> {
-            ctx.request().response().end((String)reply.result().body());
-        });
     }
 }
